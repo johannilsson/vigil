@@ -1,7 +1,7 @@
 use crate::parser;
 use crate::term::{self, RawModeGuard, Writer};
 use crossterm::{
-    event::{read, Event, KeyCode, KeyEvent},
+    event::{Event, KeyCode, KeyEvent, read},
     style::Color,
 };
 use std::io;

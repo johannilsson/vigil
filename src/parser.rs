@@ -12,10 +12,17 @@ pub enum Marker {
 }
 
 #[derive(Debug, Clone)]
+pub struct SubTask {
+    pub marker: Marker,
+    pub text: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Step {
     pub marker: Marker,
     pub bold_name: Option<String>,
     pub description: String,
+    pub subtasks: Vec<SubTask>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,29 +60,47 @@ pub fn parse_file(path: &Path) -> io::Result<TodoFile> {
                 progress_header = Some((d, t));
             }
         } else if let Some(rest) = line.strip_prefix("## ") {
-            phases.push(Phase { name: rest.trim().to_string(), steps: Vec::new() });
-        } else if let Some(rest) = line.strip_prefix("- [") {
-            let marker_char = rest.chars().next().unwrap_or(' ');
-            let marker = match marker_char {
-                'x' | 'X' => Marker::Done,
-                '~' => Marker::InProgress,
-                '!' => Marker::Failed,
-                '-' => Marker::Skipped,
-                _ => Marker::Todo,
-            };
-            // text starts after "] "
-            let text = rest.get(2..).unwrap_or("").trim();
-            let step = parse_step_text(marker, text);
+            phases.push(Phase {
+                name: rest.trim().to_string(),
+                steps: Vec::new(),
+            });
+        } else {
+            let trimmed = line.trim_start();
+            let indented = trimmed.len() < line.len();
+            if let Some(rest) = trimmed.strip_prefix("- [") {
+                let marker_char = rest.chars().next().unwrap_or(' ');
+                let marker = match marker_char {
+                    'x' | 'X' => Marker::Done,
+                    '~' => Marker::InProgress,
+                    '!' => Marker::Failed,
+                    '-' => Marker::Skipped,
+                    _ => Marker::Todo,
+                };
+                // text starts after "] "
+                let text = rest.get(2..).unwrap_or("").trim();
 
-            if step.marker == Marker::Done {
-                counted_done += 1;
-            }
-            counted_total += 1;
-
-            match phases.last_mut() {
-                Some(phase) => phase.steps.push(step),
-                None => {
-                    phases.push(Phase { name: String::new(), steps: vec![step] });
+                if indented {
+                    if let Some(step) = phases.last_mut().and_then(|p| p.steps.last_mut()) {
+                        step.subtasks.push(SubTask {
+                            marker,
+                            text: text.to_string(),
+                        });
+                    }
+                } else {
+                    let step = parse_step_text(marker, text);
+                    if step.marker == Marker::Done {
+                        counted_done += 1;
+                    }
+                    counted_total += 1;
+                    match phases.last_mut() {
+                        Some(phase) => phase.steps.push(step),
+                        None => {
+                            phases.push(Phase {
+                                name: String::new(),
+                                steps: vec![step],
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -90,7 +115,14 @@ pub fn parse_file(path: &Path) -> io::Result<TodoFile> {
     });
 
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
-    Ok(TodoFile { path: path.to_path_buf(), title, done, total, phases, modified })
+    Ok(TodoFile {
+        path: path.to_path_buf(),
+        title,
+        done,
+        total,
+        phases,
+        modified,
+    })
 }
 
 fn parse_step_text(marker: Marker, text: &str) -> Step {
@@ -106,7 +138,12 @@ fn parse_step_text(marker: Marker, text: &str) -> Step {
             .unwrap_or(rest)
             .trim()
             .to_string();
-        return Step { marker, bold_name: Some(bold_name), description };
+        return Step {
+            marker,
+            bold_name: Some(bold_name),
+            description,
+            subtasks: Vec::new(),
+        };
     }
     // No bold: split on em-dash for description, or use whole text
     let description = text
@@ -115,22 +152,25 @@ fn parse_step_text(marker: Marker, text: &str) -> Step {
         .unwrap_or(text)
         .trim()
         .to_string();
-    Step { marker, bold_name: None, description }
+    Step {
+        marker,
+        bold_name: None,
+        description,
+        subtasks: Vec::new(),
+    }
 }
 
 pub fn parse_directory(dir: &Path) -> io::Result<Vec<TodoFile>> {
     let mut files: Vec<TodoFile> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .ends_with(".todo.md")
-        })
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".todo.md"))
         .filter_map(|e| parse_file(&e.path()).ok())
         .collect();
     // Most recently modified first; fall back to title order for equal/missing mtimes.
     files.sort_by(|a, b| {
-        b.modified.cmp(&a.modified).then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
     });
     Ok(files)
 }
@@ -237,6 +277,58 @@ mod tests {
         let content = "## P\n- [X] a\n";
         let f = parse_str(content, "t11");
         assert_eq!(f.phases[0].steps[0].marker, Marker::Done);
+    }
+
+    #[test]
+    fn subtask_attached_to_parent() {
+        let content =
+            "## P\n- [ ] **Step** — desc\n  - [ ] Verify: thing A\n  - [x] Verify: thing B\n";
+        let f = parse_str(content, "sub1");
+        let step = &f.phases[0].steps[0];
+        assert_eq!(step.subtasks.len(), 2);
+        assert_eq!(step.subtasks[0].text, "Verify: thing A");
+        assert_eq!(step.subtasks[0].marker, Marker::Todo);
+        assert_eq!(step.subtasks[1].text, "Verify: thing B");
+        assert_eq!(step.subtasks[1].marker, Marker::Done);
+    }
+
+    #[test]
+    fn subtask_not_counted() {
+        let content = "## P\n- [x] **Step** — done\n  - [ ] Verify: not done\n  - [x] Verify: done\n- [ ] **Step2** — todo\n";
+        let f = parse_str(content, "sub2");
+        assert_eq!(f.done, 1);
+        assert_eq!(f.total, 2);
+    }
+
+    #[test]
+    fn subtask_all_markers() {
+        let content = "## P\n- [ ] root\n  - [ ] a\n  - [x] b\n  - [~] c\n  - [!] d\n  - [-] e\n";
+        let f = parse_str(content, "sub3");
+        let subs = &f.phases[0].steps[0].subtasks;
+        assert_eq!(subs.len(), 5);
+        assert_eq!(subs[0].marker, Marker::Todo);
+        assert_eq!(subs[1].marker, Marker::Done);
+        assert_eq!(subs[2].marker, Marker::InProgress);
+        assert_eq!(subs[3].marker, Marker::Failed);
+        assert_eq!(subs[4].marker, Marker::Skipped);
+    }
+
+    #[test]
+    fn subtask_orphan_ignored() {
+        let content = "## P\n  - [ ] orphan\n- [ ] root\n";
+        let f = parse_str(content, "sub4");
+        assert_eq!(f.phases[0].steps[0].subtasks.len(), 0);
+        assert_eq!(f.total, 1);
+    }
+
+    #[test]
+    fn subtask_multiple_steps() {
+        let content = "## P\n- [ ] **A** — a\n  - [ ] a-sub\n- [ ] **B** — b\n  - [x] b-sub\n";
+        let f = parse_str(content, "sub5");
+        assert_eq!(f.phases[0].steps[0].subtasks.len(), 1);
+        assert_eq!(f.phases[0].steps[0].subtasks[0].text, "a-sub");
+        assert_eq!(f.phases[0].steps[1].subtasks.len(), 1);
+        assert_eq!(f.phases[0].steps[1].subtasks[0].text, "b-sub");
     }
 
     #[test]

@@ -1,7 +1,7 @@
-use crate::parser::{self, Marker, Phase, Step, TodoFile};
-use crate::term::{self, hrule, progress_bar_string, RawModeGuard, Writer};
+use crate::parser::{self, Marker, Phase, Step, SubTask, TodoFile};
+use crate::term::{self, RawModeGuard, Writer, hrule, progress_bar_string};
 use crossterm::{
-    event::{poll, read, Event, KeyCode, KeyEvent},
+    event::{Event, KeyCode, KeyEvent, poll, read},
     style::Color,
 };
 use std::io;
@@ -13,6 +13,7 @@ enum DisplayLine<'a> {
     Phase(&'a str),
     StepFirst { step: &'a Step, text: String },
     StepCont(String),
+    SubTaskLine { subtask: &'a SubTask },
 }
 
 pub fn run(path: &Path, has_list: bool) -> io::Result<()> {
@@ -52,7 +53,11 @@ pub fn run(path: &Path, has_list: bool) -> io::Result<()> {
         let visible = (rows as usize).saturating_sub(5);
         scroll = scroll.min(total.saturating_sub(visible));
 
-        let vs = ViewState { scroll, visible, total };
+        let vs = ViewState {
+            scroll,
+            visible,
+            total,
+        };
         render(&mut w, &todo, path, has_list, cols, &vs, &display_lines);
     }
 }
@@ -77,6 +82,9 @@ fn collect_display_lines<'a>(phases: &'a [Phase], cols: u16) -> Vec<DisplayLine<
             }
             for cont in wrapped {
                 out.push(DisplayLine::StepCont(cont));
+            }
+            for subtask in &step.subtasks {
+                out.push(DisplayLine::SubTaskLine { subtask });
             }
         }
     }
@@ -138,6 +146,9 @@ fn render(
             DisplayLine::StepCont(text) => {
                 w.print("    ").print(text).print("\r\n");
             }
+            DisplayLine::SubTaskLine { subtask } => {
+                render_subtask_line(w, subtask);
+            }
         }
     }
 
@@ -147,7 +158,11 @@ fn render(
 
     // Footer
     let path_str = path.display().to_string();
-    let scroll_hint = if vs.total > vs.visible { "  ↑↓ scroll" } else { "" };
+    let scroll_hint = if vs.total > vs.visible {
+        "  ↑↓ scroll"
+    } else {
+        ""
+    };
     let action = if has_list { "q back to list" } else { "q quit" };
     let footer = format!("{path_str}{scroll_hint}  \u{2022}  {action}");
     let footer = truncate_path(&footer, cols as usize);
@@ -173,6 +188,24 @@ fn render_step_first(w: &mut Writer, step: &Step, text: &str) {
     w.print("\r\n");
 }
 
+fn render_subtask_line(w: &mut Writer, subtask: &SubTask) {
+    let (symbol, color) = match subtask.marker {
+        Marker::Todo => ("\u{00b7}", Color::DarkGrey),
+        Marker::InProgress => ("\u{25d0}", Color::Yellow),
+        Marker::Done => ("\u{2713}", Color::Green),
+        Marker::Failed => ("\u{2717}", Color::Red),
+        Marker::Skipped => ("\u{2013}", Color::DarkGrey),
+    };
+    w.print("    ")
+        .color(color)
+        .print(symbol)
+        .reset_attr()
+        .reset_color()
+        .print(" ");
+    w.dim().print(&subtask.text).reset_attr();
+    w.print("\r\n");
+}
+
 // Prints the first wrapped line, bolding the name portion if present.
 fn render_first_line(w: &mut Writer, line: &str, bold_name: Option<&str>) {
     let Some(name) = bold_name else {
@@ -190,7 +223,10 @@ fn render_first_line(w: &mut Writer, line: &str, bold_name: Option<&str>) {
             .nth(name_chars)
             .map(|(i, _)| i)
             .unwrap_or(line.len());
-        w.bold().print(&line[..split]).reset_attr().print(&line[split..]);
+        w.bold()
+            .print(&line[..split])
+            .reset_attr()
+            .print(&line[split..]);
     }
 }
 
@@ -223,6 +259,9 @@ fn truncate_path(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("\u{2026}{}", &s[s.len().saturating_sub(max.saturating_sub(1))..])
+        format!(
+            "\u{2026}{}",
+            &s[s.len().saturating_sub(max.saturating_sub(1))..]
+        )
     }
 }

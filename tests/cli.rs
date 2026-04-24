@@ -40,7 +40,11 @@ fn empty_directory_exits_cleanly() {
 
     fs::remove_dir_all(&dir).unwrap();
     // Should exit 0 with a message (not crash)
-    assert!(output.status.success(), "expected clean exit, stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "expected clean exit, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 // TUI tests require a real PTY for raw mode and key injection.
@@ -72,5 +76,8 @@ fn direct_file_starts_and_terminates() {
     let status = child.wait().expect("failed to wait");
     fs::remove_dir_all(&dir).unwrap();
     // SIGTERM exits with signal, not success code — just verify the process stopped
-    assert!(!status.success() || status.code().is_some(), "process should have exited");
+    assert!(
+        !status.success() || status.code().is_some(),
+        "process should have exited"
+    );
 }
